@@ -1,8 +1,7 @@
-use std::time::{Duration, Instant};
-use std::path::Path;
-use std::ops::Range;
 use std::fs::File;
-use std::io::{self, BufReader, BufRead};
+use std::io::{self, BufRead, BufReader};
+use std::ops::Range;
+use std::time::{Duration, Instant};
 type Point = (f64, f64);
 type NodeId = usize;
 
@@ -13,7 +12,7 @@ pub fn d_pt(s: &Point, t: &Point) -> f64 {
 }
 
 pub struct LCG {
-    x: u64
+    x: u64,
 }
 
 impl LCG {
@@ -35,7 +34,7 @@ pub struct Tour<'a> {
     tsp: &'a TSP,
     seq: Vec<NodeId>,
     pos: Vec<usize>,
-    cost: u64,
+    cost: i64,
 }
 
 impl<'a> Tour<'a> {
@@ -43,14 +42,14 @@ impl<'a> Tour<'a> {
         let mut seq: Vec<NodeId> = vec![];
         let mut used = vec![false; tsp.n];
         while seq.len() < tsp.n {
-            let x = if let Some(&a) = seq.last() {
-                (0..tsp.n)
-                .filter(|&i| !used[i] && i != a)
-                .min_by_key(|&i| tsp.d_ix(a, i))
-                .unwrap()
-            } else {
-                0
-            };
+            let x = seq
+                .last()
+                .and_then(|&a| {
+                    (0..tsp.n)
+                        .filter(|&i| !used[i] && i != a)
+                        .min_by_key(|&i| tsp.d_ix(a, i))
+                })
+                .unwrap_or(0);
             seq.push(x);
             used[x] = true;
         }
@@ -64,9 +63,13 @@ impl<'a> Tour<'a> {
             let y = *seq.get(i + 1).unwrap_or(&seq[0]);
             pos[x] = i;
             cost += tsp.d_ix(x, y);
-            println!("{} {} {}", tsp.d_ix(x, y), x, y);
         }
-        Self { tsp, seq, pos, cost }
+        Self {
+            tsp,
+            seq,
+            pos,
+            cost,
+        }
     }
 
     pub fn inc(&self, i: usize) -> usize {
@@ -107,20 +110,24 @@ impl<'a> Tour<'a> {
         }
     }
 
-    pub fn reverse(&mut self, t1: NodeId, t2: NodeId) {
-        let m = self.seglen(t1, t2).div_ceil(2);
-        let mut i1 = self.pos[t1];
-        let mut i2 = self.pos[t2];
+    pub fn reverse(&mut self, x: NodeId, y: NodeId) {
+        let m = self.seglen(x, y).div_ceil(2);
+        let mut i = self.pos[x];
+        let mut j = self.pos[y];
         for _ in 0..m {
-            self.seq.swap(i1, i2);
-            self.pos[self.seq[i1]] = i1;
-            self.pos[self.seq[i2]] = i2;
-            i1 = self.inc(i1);
-            i2 = self.dec(i2);
+            self.seq.swap(i, j);
+            self.pos[self.seq[i]] = i;
+            self.pos[self.seq[j]] = j;
+            i = self.inc(i);
+            j = self.dec(j);
         }
     }
 
-    pub fn cost(&self) -> u64 {
+    pub fn seq(&self) -> &[NodeId] {
+        &self.seq
+    }
+
+    pub fn cost(&self) -> i64 {
         self.cost
     }
 }
@@ -132,7 +139,10 @@ struct Timer {
 
 impl Timer {
     pub fn new(duration: Duration) -> Self {
-        Self { t: Instant::now(), duration }
+        Self {
+            t: Instant::now(),
+            duration,
+        }
     }
 
     pub fn ok(&self) -> bool {
@@ -153,32 +163,51 @@ impl<'a, 'b> Opt2<'a, 'b> {
 }
 
 impl<'a, 'b> Iterator for Opt2<'a, 'b> {
-    type Item = u64;
+    type Item = i64;
     fn next(&mut self) -> Option<Self::Item> {
         let tour = &mut self.tour;
         let d = |i, j| tour.tsp.d_ix(i, j);
         let n = tour.tsp.n;
 
         while let Some(t1) = self.r.next() {
-            let t2 = tour.next_of(t1);
-            for &t3 in tour.tsp.c[t1].iter() {
-                let g1 = d(t1, t2) - d(t1, t3); 
-                if g1 > 0 {
-                    let t4 = tour.next_of(t3);
+            for dir in [true, false] {
+                let t2 = if dir {
+                    tour.next_of(t1)
+                } else {
+                    tour.prev_of(t1)
+                };
+                for &t3 in tour.tsp.c[t1].iter() {
+                    let g1 = d(t1, t2) - d(t1, t3);
+                    if g1 < 0 {
+                        break;
+                    }
+
+                    let t4 = if dir {
+                        tour.next_of(t3)
+                    } else {
+                        tour.prev_of(t3)
+                    };
                     if t1 != t4 && t2 != t3 {
-                        let g2 = g1 + d(t3, t4) - d(t2, t4);
-                        if g2 > 0 {
-                            if tour.seglen(t2, t3) < n / 2 {
-                                tour.reverse(t2, t3);
+                        let g2 = d(t3, t4) - d(t2, t4);
+                        let g = g1 + g2;
+                        if g > 0 {
+                            if dir {
+                                if tour.seglen(t2, t3) < n / 2 {
+                                    tour.reverse(t2, t3);
+                                } else {
+                                    tour.reverse(t4, t1);
+                                }
                             } else {
-                                tour.reverse(t4, t1);
+                                if tour.seglen(t1, t4) < n / 2 {
+                                    tour.reverse(t1, t4);
+                                } else {
+                                    tour.reverse(t3, t2);
+                                }
                             }
-                            tour.cost -= g2;
-                            return Some(g2);
+                            tour.cost -= g;
+                            return Some(g);
                         }
                     }
-                } else {
-                    break;  // g1 < 0 for all t3' after t3, as d(t1, t3') > d(t1, t3)
                 }
             }
         }
@@ -207,8 +236,9 @@ impl<'a> Solver<'a> {
     pub fn run(&mut self) {
         while self.timer.ok() {
             // self.cur.perturb(&mut self.rng);
-            let _ = Opt2::new(&mut self.cur)
-                .take_while(|_| self.timer.ok());
+            Opt2::new(&mut self.cur)
+                .take_while(|_| self.timer.ok())
+                .for_each(drop);
             // Opt3::new(&mut self.cur)
             //     .take_while(|_| self.timer.ok());
             if self.cur.cost < self.bst.cost {
@@ -226,7 +256,7 @@ impl<'a> Solver<'a> {
 
 pub struct TSP {
     n: usize,
-    m: Vec<u64>,
+    m: Vec<i64>,
     c: Vec<Vec<NodeId>>,
 }
 
@@ -235,49 +265,56 @@ impl TSP {
 
     pub fn new(p: &[Point]) -> Self {
         let n = p.len();
-        let m: Vec<u64> = p.iter() 
-            .flat_map(|s| p.iter()
-                .map(|t| d_pt(s, t) as u64))
+        let m: Vec<i64> = p
+            .iter()
+            .flat_map(|s| p.iter().map(|t| d_pt(s, t).round() as i64))
             .collect();
         let c = (0..n)
             .map(|i| {
-                let mut v: Vec<NodeId> = (0..n).collect();
-                v.sort_by_key(|j| m[i * n + j]);
+                let mut v: Vec<NodeId> = (0..n).filter(|&j| i != j).collect();
+                v.sort_by_key(|&j| m[i * n + j]);
                 v.truncate(Self::NEIGHBOR_LIMIT);
                 v
             })
             .collect();
-        Self {n, m, c}
+        Self { n, m, c }
     }
 
-    fn pff(f: File) -> io::Result<Vec<Point>> {
-        let v: Vec<Option<Point>> = BufReader::new(f)
+    fn parse_tsp(r: impl BufRead, is_kattis: bool) -> io::Result<Self> {
+        let v: Vec<Option<Point>> = r
             .lines()
-            .map(|line| line
-                .map(|s| {
-                    let mut r = s.split(" ")
-                        .skip(1)
+            .map(|line| {
+                line.map(|s| {
+                    let mut r = s
+                        .split(" ")
+                        .skip(if is_kattis { 0 } else { 1 })
                         .map(|x| x.parse::<f64>());
                     Some((r.next()?.ok()?, r.next()?.ok()?))
                 })
-            )
+            })
             .collect::<io::Result<_>>()?;
-        Ok(v.into_iter().flatten().collect())
-    }
-
-    pub fn from_path(path: &Path) -> io::Result<Self> {
-        let f = File::open(path)?;
-        let p = Self::pff(f)?;
+        let p = v.into_iter().flatten().collect::<Vec<_>>();
         Ok(Self::new(&p))
     }
 
-    pub fn d_ix(&self, i: usize, j: usize) -> u64 {
+    pub fn parse_tsp_file(f: File) -> io::Result<Self> {
+        Self::parse_tsp(BufReader::new(f), false)
+    }
+
+    pub fn parse_kattis() -> io::Result<Self> {
+        let stdin = io::stdin();
+        Self::parse_tsp(stdin.lock(), true)
+    }
+
+    pub fn d_ix(&self, i: usize, j: usize) -> i64 {
         self.m[i * self.n + j]
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use crate::*;
 
     const POINTS: [Point; 10] = [
@@ -288,7 +325,7 @@ mod tests {
         (89.1299, 17.6266),
         (76.2097, 40.5706),
         (45.6468, 93.5470),
-        (1.8504 , 91.6904),
+        (1.8504, 91.6904),
         (82.1407, 41.0270),
         (44.4703, 89.3650),
     ];
@@ -296,19 +333,38 @@ mod tests {
 
     #[test]
     fn test_d_pt() {
-        let ds = [24, 5, 26, 69, 16, 4, 15, 39, 24, 97];
-        for (i, d) in ds.into_iter().enumerate() {
+        let ans = [24, 6, 26, 69, 16, 4, 15, 40, 25, 98];
+        for (i, d) in ans.into_iter().enumerate() {
             let x = &POINTS[SEQ[i]];
             let y = &POINTS[SEQ[(i + 1) % 10]];
-            assert_eq!(d_pt(x, y) as u64, d);
+            assert_eq!(d_pt(x, y).round() as i64, d);
         }
     }
 
     #[test]
-    fn test_pff() {
-        let p = File::open(Path::new("tests/sample.tsp"))
-            .and_then(TSP::pff).unwrap();
-        assert_eq!(&POINTS[..], &p[..]);
+    fn test_tsp_new() {
+        let tsp = TSP::new(&POINTS);
+        for i in 0..10 {
+            let j = (i + 1) % 10;
+            let x = &POINTS[i];
+            let y = &POINTS[j];
+            assert_eq!(tsp.d_ix(i, j), d_pt(x, y).round() as i64);
+            assert_eq!(tsp.d_ix(j, i), d_pt(y, x).round() as i64);
+        }
+    }
+
+    #[test]
+    fn test_tsp_parse_tsp() {
+        let path = Path::new("tests/sample.tsp");
+        let tsp = File::open(path).and_then(TSP::parse_tsp_file).unwrap();
+        let ans = [
+            0, 74, 46, 48, 44, 28, 59, 98, 24, 58, 74, 0, 40, 26, 90, 66, 27, 25, 70, 24, 46, 40,
+            0, 22, 80, 54, 15, 59, 55, 16, 48, 26, 22, 0, 69, 43, 20, 50, 47, 16, 44, 90, 80, 69,
+            0, 26, 87, 114, 24, 85, 28, 66, 54, 43, 26, 0, 61, 90, 6, 58, 59, 27, 15, 20, 87, 61,
+            0, 44, 64, 4, 98, 25, 59, 50, 114, 90, 44, 0, 95, 43, 24, 70, 55, 47, 24, 6, 64, 95, 0,
+            61, 58, 24, 16, 16, 85, 58, 4, 43, 61, 0,
+        ];
+        assert_eq!(&tsp.m[..], ans);
     }
 
     #[test]
@@ -316,5 +372,14 @@ mod tests {
         let tsp = TSP::new(&POINTS);
         let t = Tour::new(&tsp);
         assert_eq!(t.seq, SEQ);
+    }
+
+    #[test]
+    fn test_opt2() {
+        let tsp = TSP::new(&POINTS);
+        let mut t = Tour::new(&tsp);
+        Opt2::new(&mut t).for_each(drop);
+        assert_eq!(t.cost(), 276);
+        assert_eq!(t.seq(), [0, 8, 4, 5, 3, 1, 7, 9, 6, 2]);
     }
 }

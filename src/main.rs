@@ -1,11 +1,17 @@
-use std::{path::Path, io};
+use std::io;
 
-use tsp_ils::{TSP, Solver};
+use tsp_ils::{Solver, TSP};
 
 fn main() -> io::Result<()> {
-    let t = TSP::from_path(Path::new("tests/berlin52.tsp"))?;
+    /*
+    let t = File::open(Path::new("tests/sample.tsp"))
+        .and_then(TSP::parse_tsp_file)?;
+     */
+    let t = TSP::parse_kattis()?;
     let mut s = Solver::new(&t);
-    // s.run();
-    println!("{}", s.solution().cost());
+    s.run();
+    for x in s.solution().seq() {
+        println!("{}", x);
+    }
     Ok(())
 }
