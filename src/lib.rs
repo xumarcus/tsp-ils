@@ -36,77 +36,59 @@ impl LCG {
     }
 }
 
-#[derive(Clone)]
-pub struct Tour<'a> {
-    tsp: &'a TSP,
-    seq: Vec<NodeId>,
-    pos: Vec<usize>,
-    dlb: Vec<bool>,
-    cost: i64,
+pub fn inc_mod(i: usize, n: usize) -> usize {
+    let j = i + 1;
+    if j >= n {
+        j - n
+    } else {
+        j
+    }
 }
 
-impl<'a> Tour<'a> {
-    pub fn new(tsp: &'a TSP) -> Self {
-        let mut seq: Vec<NodeId> = vec![];
-        let mut used = vec![false; tsp.n];
-        while seq.len() < tsp.n {
-            let x = seq
-                .last()
-                .and_then(|&a| {
-                    (0..tsp.n)
-                        .filter(|&i| !used[i] && i != a)
-                        .min_by_key(|&i| tsp.d_id(a, i))
-                })
-                .unwrap_or(0);
-            seq.push(x);
-            used[x] = true;
-        }
-        let mut pos = vec![0; tsp.n];
-        let cost = Self::from_seq(tsp, &seq, &mut pos);
-        Self {
-            tsp,
+pub fn dec_mod(i: usize, n: usize) -> usize {
+    if i > 0 {
+        i - 1
+    } else {
+        n - 1
+    }
+}
+
+#[derive(Clone)]
+pub struct TourData {
+    seq: Vec<NodeId>,
+    pos: Vec<usize>,
+}
+
+impl TourData {
+    pub fn new(seq: Vec<NodeId>) -> Self {
+        let n = seq.len();
+        let mut x = Self {
             seq,
-            pos,
-            dlb: vec![false; tsp.n],
-            cost,
+            pos: vec![0; n],
+        };
+        x.repos();
+        x
+    }
+
+    pub fn repos(&mut self) {
+        let Self { seq, pos } = self;
+        for (i, &x) in seq.iter().enumerate() {
+            pos[x] = i;
         }
     }
 
-    fn from_seq(tsp: &'a TSP, seq: &[NodeId], pos: &mut [usize]) -> i64 {
-        let mut cost = 0;
-        for (i, &x) in seq.iter().enumerate() {
-            let y = *seq.get(i + 1).unwrap_or(&seq[0]);
-            pos[x] = i;
-            cost += tsp.d_id(x, y);
-        }
-        cost
+    pub fn n(&self) -> usize {
+        self.seq.len()
     }
 
     pub fn inc(&self, i: usize) -> usize {
-        let n = self.tsp.n;
-        let j = i + 1;
-        if j >= n {
-            j - n
-        } else {
-            j
-        }
+        let n = self.n();
+        inc_mod(i, n)
     }
 
     pub fn dec(&self, i: usize) -> usize {
-        let n = self.tsp.n;
-        if i > 0 {
-            i - 1
-        } else {
-            n - 1
-        }
-    }
-
-    pub fn seq(&self) -> &[NodeId] {
-        &self.seq
-    }
-
-    pub fn cost(&self) -> i64 {
-        self.cost
+        let n = self.n();
+        dec_mod(i, n)
     }
 
     pub fn next_id(&self, t: NodeId) -> NodeId {
@@ -117,10 +99,18 @@ impl<'a> Tour<'a> {
         self.seq[self.dec(self.pos[t])]
     }
 
+    pub fn id(&self, t: NodeId, dir: bool) -> NodeId {
+        if dir {
+            self.next_id(t)
+        } else {
+            self.prev_id(t)
+        }
+    }
+
     pub fn seglen(&self, t1: NodeId, t2: NodeId) -> usize {
         let i1 = self.pos[t1];
         let i2 = self.pos[t2];
-        let n = self.tsp.n;
+        let n = self.n();
         if i1 <= i2 {
             i2 - i1
         } else {
@@ -141,28 +131,176 @@ impl<'a> Tour<'a> {
         }
     }
 
-    pub fn perturb(&mut self, rng: &mut LCG, sbuf: &mut Vec<NodeId>, pbuf: &mut Vec<usize>) {
-        let n = self.tsp.n;
+    pub fn opt2move(&mut self, t1: NodeId, t2: NodeId, t3: NodeId, t4: NodeId) {
+        let n = self.n();
+        if self.seglen(t2, t3) < n / 2 {
+            self.reverse(t2, t3);
+        } else {
+            self.reverse(t4, t1);
+        }
+    }
+
+    pub fn perturb(&mut self, rng: &mut LCG, buf: &mut Self) -> Option<[NodeId; 8]> {
+        let n = self.n();
+        let Self { seq, .. } = self;
 
         if n > 8 {
             let i1 = rng.gen_by(1..n / 4);
+            let i2 = inc_mod(i1, n);
             let i3 = rng.gen_by(1..n / 4) + i1;
+            let i4 = inc_mod(i3, n);
             let i5 = rng.gen_by(1..n / 4) + i3;
-            // i7
+            let i6 = inc_mod(i5, n);
+            let i7 = n - 1;
+            let i8 = 0;
+            let ans = [
+                seq[i1], seq[i2], seq[i3], seq[i4], seq[i5], seq[i6], seq[i7], seq[i8],
+            ];
 
-            sbuf.clear();
-            for slice in [
-                &self.seq[..i1],
-                &self.seq[i5..],
-                &self.seq[i3..i5],
-                &self.seq[i1..i3],
-            ] {
-                sbuf.extend_from_slice(slice);
+            buf.seq.clear();
+            for slice in [&seq[..i1], &seq[i5..], &seq[i3..i5], &seq[i1..i3]] {
+                buf.seq.extend_from_slice(slice);
             }
+            buf.repos();
+            swap(self, buf);
 
-            self.cost = Self::from_seq(&self.tsp, sbuf, pbuf);
-            swap(&mut self.seq, sbuf);
-            swap(&mut self.pos, pbuf);
+            Some(ans)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Optim {
+    q: VecDeque<NodeId>,
+    dlb: Vec<bool>,
+}
+
+impl Optim {
+    pub fn new(n: usize) -> Self {
+        Self {
+            q: (0..n).collect(),
+            dlb: vec![false; n],
+        }
+    }
+
+    fn reset_only(&mut self, x: NodeId) {
+        let Self { q, dlb } = self;
+        if dlb[x] {
+            dlb[x] = false;
+            q.push_back(x);
+        }
+    }
+
+    pub fn reset(&mut self, data: &TourData, s: &[NodeId]) {
+        for &x in s {
+            self.reset_only(x);
+            self.reset_only(data.next_id(x));
+            self.reset_only(data.prev_id(x));
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StepError {
+    EmptyQueue,
+    HasDLB,
+    NoGainMove,
+}
+
+#[derive(Clone)]
+pub struct Tour<'a> {
+    cost: i64,
+    tsp: &'a TSP,
+    data: TourData,
+    opt2: Optim,
+    opt3: Optim,
+}
+
+impl<'a> Tour<'a> {
+    pub fn new(tsp: &'a TSP) -> Self {
+        let mut seq: Vec<NodeId> = vec![];
+        let mut used = vec![false; tsp.n];
+        while seq.len() < tsp.n {
+            let x = seq
+                .last()
+                .and_then(|&a| {
+                    (0..tsp.n)
+                        .filter(|&i| !used[i] && i != a)
+                        .min_by_key(|&i| tsp.d_id(a, i))
+                })
+                .unwrap_or(0);
+            seq.push(x);
+            used[x] = true;
+        }
+
+        Self {
+            cost: tsp.compute_cost(&seq),
+            tsp,
+            data: TourData::new(seq),
+            opt2: Optim::new(tsp.n),
+            opt3: Optim::new(tsp.n),
+        }
+    }
+
+    pub fn seq(&self) -> &[NodeId] {
+        &self.data.seq
+    }
+
+    pub fn cost(&self) -> i64 {
+        self.cost
+    }
+
+    pub fn perturb(&mut self, rng: &mut LCG, buf: &mut TourData) {
+        let Self {
+            tsp, data, cost, opt2, ..
+        } = self;
+        if let Some(indices) = data.perturb(rng, buf) {
+            opt2.reset(data, &indices);
+            *cost = tsp.compute_cost(&data.seq);
+        }
+    }
+
+    pub fn opt2step(&mut self) -> Result<i64, StepError> {
+        let Self {
+            tsp,
+            data,
+            opt2,
+            cost,
+            ..
+        } = self;
+        let Optim { q, dlb } = opt2;
+        let d = |i, j| tsp.d_id(i, j);
+        let t1 = q.pop_front().ok_or(StepError::EmptyQueue)?;
+        if dlb[t1] {
+            Err(StepError::HasDLB)
+        } else {
+            dlb[t1] = true;
+            for dir in [true, false] {
+                let t2 = data.id(t1, dir);
+                for &t3 in tsp.c[t1].iter().filter(|&&x| !dlb[x]) {
+                    if d(t1, t2) < d(t1, t3) {
+                        break;
+                    }
+                    let t4 = data.id(t3, dir);
+
+                    if t1 != t4 && t2 != t3 {
+                        let g = d(t1, t2) - d(t1, t3) + d(t3, t4) - d(t2, t4);
+                        if g > 0 {
+                            if dir {
+                                data.opt2move(t1, t2, t3, t4);
+                            } else {
+                                data.opt2move(t2, t1, t4, t3);
+                            }
+                            opt2.reset(data, &[t1, t2, t3, t4]);
+                            *cost -= g;
+                            return Ok(g);
+                        }
+                    }
+                }
+            }
+            Err(StepError::NoGainMove)
         }
     }
 }
@@ -176,88 +314,12 @@ impl Timer {
     pub fn new(duration: Duration) -> Self {
         Self {
             t: Instant::now(),
-            duration: duration - Duration::from_millis(50),
+            duration: duration - Duration::from_millis(200),
         }
     }
 
     pub fn ok(&self) -> bool {
         self.t.elapsed() < self.duration
-    }
-}
-
-struct Opt2<'a, 'b> {
-    tour: &'b mut Tour<'a>,
-    q: VecDeque<NodeId>,
-}
-
-impl<'a, 'b> Opt2<'a, 'b> {
-    pub fn new(tour: &'b mut Tour<'a>) -> Self {
-        let n = tour.tsp.n;
-        Self {
-            tour,
-            q: (0..n).collect(),
-        }
-    }
-}
-
-impl<'a, 'b> Iterator for Opt2<'a, 'b> {
-    type Item = i64;
-    fn next(&mut self) -> Option<Self::Item> {
-        let tour = &mut self.tour;
-        let d = |i, j| tour.tsp.d_id(i, j);
-        let n = tour.tsp.n;
-
-        while let Some(t1) = self.q.pop_front().filter(|&k| !tour.dlb[k]) {
-            for dir in [true, false] {
-                let t2 = if dir {
-                    tour.next_id(t1)
-                } else {
-                    tour.prev_id(t1)
-                };
-
-                for &t3 in tour.tsp.c[t1].iter().filter(|&&k| !tour.dlb[k]) {
-                    let g1 = d(t1, t2) - d(t1, t3);
-                    if g1 < 0 {
-                        break;
-                    }
-
-                    let t4 = if dir {
-                        tour.next_id(t3)
-                    } else {
-                        tour.prev_id(t3)
-                    };
-
-                    if t1 != t4 && t2 != t3 {
-                        let g2 = d(t3, t4) - d(t2, t4);
-                        let g = g1 + g2;
-                        if g > 0 {
-                            if dir {
-                                if tour.seglen(t2, t3) < n / 2 {
-                                    tour.reverse(t2, t3);
-                                } else {
-                                    tour.reverse(t4, t1);
-                                }
-                            } else {
-                                if tour.seglen(t1, t4) < n / 2 {
-                                    tour.reverse(t1, t4);
-                                } else {
-                                    tour.reverse(t3, t2);
-                                }
-                            }
-                            for k in [t1, t2, t3, t4] {
-                                if tour.dlb[k] {
-                                    tour.dlb[k] = false;
-                                    self.q.push_back(k);
-                                }
-                            }
-                            tour.cost -= g;
-                            return Some(g);
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
 }
 
@@ -279,29 +341,39 @@ impl<'a> Solver<'a> {
         }
     }
 
-    pub fn run(&mut self) {
-        let n = self.cur.tsp.n;
-        let mut sbuf: Vec<NodeId> = Vec::with_capacity(n);
-        let mut pbuf: Vec<usize> = vec![0; n];
+    pub fn run(&mut self) -> usize {
+        let Self {
+            timer,
+            cur,
+            rng,
+            bst,
+        } = self;
+        let n = cur.tsp.n;
+        let mut buf = TourData {
+            seq: Vec::with_capacity(n),
+            pos: vec![0; n],
+        };
 
-        while self.timer.ok() {
-            self.cur.perturb(&mut self.rng, &mut sbuf, &mut pbuf);
+        let mut cnt = 0;
+        while timer.ok() {
+            cnt += 1;
+            cur.perturb(rng, &mut buf);
 
-            let mut opt2 = Opt2::new(&mut self.cur);
-            while self.timer.ok() {
-                if opt2.next() == None {
+            while timer.ok() {
+                if cur.opt2step() == Err(StepError::EmptyQueue) {
                     break;
                 }
             }
 
             // Opt3::new(&mut self.cur)
             //     .take_while(|_| self.timer.ok());
-            if self.cur.cost < self.bst.cost {
-                self.bst = self.cur.clone();
+            if cur.cost < bst.cost {
+                *bst = cur.clone();
             } else {
-                self.cur = self.bst.clone();
+                *cur = bst.clone();
             }
         }
+        cnt
     }
 
     pub fn solution(&self) -> &Tour {
@@ -363,6 +435,15 @@ impl TSP {
 
     pub fn d_id(&self, i: usize, j: usize) -> i64 {
         self.m[i * self.n + j]
+    }
+
+    pub fn compute_cost(&self, seq: &[NodeId]) -> i64 {
+        let mut cost = 0;
+        for (i, &x) in seq.iter().enumerate() {
+            let y = *seq.get(i + 1).unwrap_or(&seq[0]);
+            cost += self.d_id(x, y);
+        }
+        cost
     }
 }
 
@@ -430,14 +511,16 @@ mod tests {
     fn test_tour_new() {
         let tsp = TSP::new(&POINTS);
         let t = Tour::new(&tsp);
-        assert_eq!(t.seq, SEQ);
+        assert_eq!(t.data.seq, SEQ);
     }
 
     #[test]
     fn test_opt2() {
         let tsp = TSP::new(&POINTS);
         let mut t = Tour::new(&tsp);
-        Opt2::new(&mut t).for_each(drop);
+        for _ in 0..10 {
+            let _ = t.opt2step();
+        }
         assert_eq!(t.cost(), 276);
         assert_eq!(t.seq(), [0, 8, 4, 5, 3, 1, 7, 9, 6, 2]);
     }
