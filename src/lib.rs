@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::mem::swap;
@@ -40,6 +41,7 @@ pub struct Tour<'a> {
     tsp: &'a TSP,
     seq: Vec<NodeId>,
     pos: Vec<usize>,
+    dlb: Vec<bool>,
     cost: i64,
 }
 
@@ -65,6 +67,7 @@ impl<'a> Tour<'a> {
             tsp,
             seq,
             pos,
+            dlb: vec![false; tsp.n],
             cost,
         }
     }
@@ -126,7 +129,6 @@ impl<'a> Tour<'a> {
     }
 
     pub fn reverse(&mut self, x: NodeId, y: NodeId) {
-        // (unstable) let m = self.seglen(x, y).div_ceil(2);
         let m = (self.seglen(x, y) + 1) / 2;
         let mut i = self.pos[x];
         let mut j = self.pos[y];
@@ -185,13 +187,16 @@ impl Timer {
 
 struct Opt2<'a, 'b> {
     tour: &'b mut Tour<'a>,
-    r: Range<NodeId>,
+    q: VecDeque<NodeId>,
 }
 
 impl<'a, 'b> Opt2<'a, 'b> {
     pub fn new(tour: &'b mut Tour<'a>) -> Self {
         let n = tour.tsp.n;
-        Self { tour, r: 0..n }
+        Self {
+            tour,
+            q: (0..n).collect(),
+        }
     }
 }
 
@@ -202,7 +207,7 @@ impl<'a, 'b> Iterator for Opt2<'a, 'b> {
         let d = |i, j| tour.tsp.d_id(i, j);
         let n = tour.tsp.n;
 
-        while let Some(t1) = self.r.next() {
+        while let Some(t1) = self.q.pop_front().filter(|&k| !tour.dlb[k]) {
             for dir in [true, false] {
                 let t2 = if dir {
                     tour.next_id(t1)
@@ -210,7 +215,7 @@ impl<'a, 'b> Iterator for Opt2<'a, 'b> {
                     tour.prev_id(t1)
                 };
 
-                for &t3 in tour.tsp.c[t1].iter() {
+                for &t3 in tour.tsp.c[t1].iter().filter(|&&k| !tour.dlb[k]) {
                     let g1 = d(t1, t2) - d(t1, t3);
                     if g1 < 0 {
                         break;
@@ -237,6 +242,12 @@ impl<'a, 'b> Iterator for Opt2<'a, 'b> {
                                     tour.reverse(t1, t4);
                                 } else {
                                     tour.reverse(t3, t2);
+                                }
+                            }
+                            for k in [t1, t2, t3, t4] {
+                                if tour.dlb[k] {
+                                    tour.dlb[k] = false;
+                                    self.q.push_back(k);
                                 }
                             }
                             tour.cost -= g;
@@ -383,6 +394,10 @@ mod tests {
             let y = &POINTS[SEQ[(i + 1) % 10]];
             assert_eq!(d_pt(x, y).round() as i64, d);
         }
+
+        let a = (999999.0, -999999.0);
+        let b = (-999999.0, 999999.0);
+        assert_eq!(d_pt(&a, &b) as i64, 2828424);
     }
 
     #[test]
