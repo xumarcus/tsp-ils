@@ -7,11 +7,34 @@ use std::time::{Duration, Instant};
 type Point = (f64, f64);
 type NodeId = usize;
 
-pub fn d_pt(s: &Point, t: &Point) -> f64 {
-    let dx = s.0 - t.0;
-    let dy = s.1 - t.1;
-    (dx * dx + dy * dy).sqrt()
+mod util {
+    use crate::Point;
+
+    pub fn d_pt(s: &Point, t: &Point) -> f64 {
+        let dx = s.0 - t.0;
+        let dy = s.1 - t.1;
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    pub const fn inc_mod(i: usize, n: usize) -> usize {
+        let j = i + 1;
+        if j >= n {
+            j - n
+        } else {
+            j
+        }
+    }
+
+    pub const fn dec_mod(i: usize, n: usize) -> usize {
+        if i > 0 {
+            i - 1
+        } else {
+            n - 1
+        }
+    }
 }
+
+use util::*;
 
 pub struct LCG {
     x: usize,
@@ -36,25 +59,8 @@ impl LCG {
     }
 }
 
-pub fn inc_mod(i: usize, n: usize) -> usize {
-    let j = i + 1;
-    if j >= n {
-        j - n
-    } else {
-        j
-    }
-}
-
-pub fn dec_mod(i: usize, n: usize) -> usize {
-    if i > 0 {
-        i - 1
-    } else {
-        n - 1
-    }
-}
-
 #[derive(Clone)]
-pub struct TourData {
+struct TourData {
     seq: Vec<NodeId>,
     pos: Vec<usize>,
 }
@@ -172,41 +178,45 @@ impl TourData {
 }
 
 #[derive(Clone)]
-struct Optim {
-    q: VecDeque<NodeId>,
-    dlb: Vec<bool>,
+struct CandidateQueue {
+    queue: VecDeque<NodeId>,
+    seen: Vec<bool>,
 }
 
-impl Optim {
+impl CandidateQueue {
     pub fn new(n: usize) -> Self {
         Self {
-            q: (0..n).collect(),
-            dlb: vec![false; n],
+            queue: (0..n).collect(),
+            seen: vec![true; n],
         }
     }
 
-    fn reset_only(&mut self, x: NodeId) {
-        let Self { q, dlb } = self;
-        if dlb[x] {
-            dlb[x] = false;
+    pub fn pop(&mut self) -> Option<NodeId> {
+        let Self { queue: q, seen } = self;
+        let x = q.pop_front()?;
+        seen[x] = false;
+        Some(x)
+    }
+
+    pub fn push(&mut self, x: NodeId) {
+        let Self { queue: q, seen } = self;
+        if !seen[x] {
+            seen[x] = true;
             q.push_back(x);
         }
     }
 
-    pub fn reset(&mut self, data: &TourData, s: &[NodeId]) {
-        for &x in s {
-            self.reset_only(x);
-            self.reset_only(data.next_id(x));
-            self.reset_only(data.prev_id(x));
-        }
+    pub fn push_neighbors(&mut self, data: &TourData, x: NodeId) {
+        self.push(x);
+        self.push(data.next_id(x));
+        self.push(data.prev_id(x));
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum StepError {
-    EmptyQueue,
-    HasDLB,
-    NoGainMove,
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StepError {
+    SetEmpty,
+    NoGainMove(NodeId),
 }
 
 #[derive(Clone)]
@@ -214,8 +224,8 @@ pub struct Tour<'a> {
     cost: i64,
     tsp: &'a TSP,
     data: TourData,
-    opt2: Optim,
-    opt3: Optim,
+    cq2: CandidateQueue,
+    cq3: CandidateQueue,
 }
 
 impl<'a> Tour<'a> {
@@ -239,8 +249,8 @@ impl<'a> Tour<'a> {
             cost: tsp.compute_cost(&seq),
             tsp,
             data: TourData::new(seq),
-            opt2: Optim::new(tsp.n),
-            opt3: Optim::new(tsp.n),
+            cq2: CandidateQueue::new(tsp.n),
+            cq3: CandidateQueue::new(tsp.n),
         }
     }
 
@@ -252,56 +262,59 @@ impl<'a> Tour<'a> {
         self.cost
     }
 
-    pub fn perturb(&mut self, rng: &mut LCG, buf: &mut TourData) {
+    fn perturb(&mut self, rng: &mut LCG, buf: &mut TourData) {
         let Self {
-            tsp, data, cost, opt2, ..
+            tsp,
+            cost,
+            data,
+            cq2,
+            ..
         } = self;
         if let Some(indices) = data.perturb(rng, buf) {
-            opt2.reset(data, &indices);
+            for x in indices {
+                cq2.push_neighbors(data, x);
+            }
             *cost = tsp.compute_cost(&data.seq);
         }
     }
 
-    pub fn opt2step(&mut self) -> Result<i64, StepError> {
+    fn opt2step(&mut self) -> Result<i64, StepError> {
         let Self {
             tsp,
             data,
-            opt2,
+            cq2,
             cost,
             ..
         } = self;
-        let Optim { q, dlb } = opt2;
-        let d = |i, j| tsp.d_id(i, j);
-        let t1 = q.pop_front().ok_or(StepError::EmptyQueue)?;
-        if dlb[t1] {
-            Err(StepError::HasDLB)
-        } else {
-            dlb[t1] = true;
-            for dir in [true, false] {
-                let t2 = data.id(t1, dir);
-                for &t3 in tsp.c[t1].iter().filter(|&&x| !dlb[x]) {
-                    if d(t1, t2) < d(t1, t3) {
-                        break;
-                    }
-                    let t4 = data.id(t3, dir);
 
-                    if t1 != t4 && t2 != t3 {
-                        let g = d(t1, t2) - d(t1, t3) + d(t3, t4) - d(t2, t4);
-                        if g > 0 {
-                            if dir {
-                                data.opt2move(t1, t2, t3, t4);
-                            } else {
-                                data.opt2move(t2, t1, t4, t3);
-                            }
-                            opt2.reset(data, &[t1, t2, t3, t4]);
-                            *cost -= g;
-                            return Ok(g);
+        let d = |i, j| tsp.d_id(i, j);
+        let t1 = cq2.pop().ok_or(StepError::SetEmpty)?;
+        for dir in [true, false] {
+            let t2 = data.id(t1, dir);
+            for &t3 in &tsp.c[t1] {
+                if d(t1, t2) < d(t1, t3) {
+                    break;
+                }
+                let t4 = data.id(t3, dir);
+
+                if t1 != t4 && t2 != t3 {
+                    let g = d(t1, t2) - d(t1, t3) + d(t3, t4) - d(t2, t4);
+                    if g > 0 {
+                        if dir {
+                            data.opt2move(t1, t2, t3, t4);
+                        } else {
+                            data.opt2move(t2, t1, t4, t3);
                         }
+                        for x in [t1, t2, t3, t4] {
+                            cq2.push_neighbors(data, x);
+                        }
+                        *cost -= g;
+                        return Ok(g);
                     }
                 }
             }
-            Err(StepError::NoGainMove)
         }
+        Err(StepError::NoGainMove(t1))
     }
 }
 
@@ -360,8 +373,9 @@ impl<'a> Solver<'a> {
             cur.perturb(rng, &mut buf);
 
             while timer.ok() {
-                if cur.opt2step() == Err(StepError::EmptyQueue) {
-                    break;
+                match cur.opt2step() {
+                    Err(StepError::SetEmpty) => break,
+                    _ => continue,
                 }
             }
 
@@ -516,10 +530,35 @@ mod tests {
 
     #[test]
     fn test_opt2() {
+        use crate::StepError::*;
+
         let tsp = TSP::new(&POINTS);
         let mut t = Tour::new(&tsp);
-        for _ in 0..10 {
-            let _ = t.opt2step();
+        let ans = [
+            Ok(23),
+            Ok(5),
+            Err(NoGainMove(2)),
+            Ok(8),
+            Err(NoGainMove(4)),
+            Err(NoGainMove(5)),
+            Ok(6),
+            Ok(5),
+            Err(NoGainMove(8)),
+            Err(NoGainMove(9)),
+            Err(NoGainMove(0)),
+            Err(NoGainMove(1)),
+            Err(NoGainMove(3)),
+            Err(NoGainMove(6)),
+            Err(NoGainMove(2)),
+            Err(NoGainMove(5)),
+            Err(NoGainMove(7)),
+            Err(SetEmpty),
+            Err(SetEmpty),
+            Err(SetEmpty),
+        ];
+        for x in ans {
+            assert_eq!(t.opt2step(), x);
+            assert_eq!(t.cost(), tsp.compute_cost(t.seq()));
         }
         assert_eq!(t.cost(), 276);
         assert_eq!(t.seq(), [0, 8, 4, 5, 3, 1, 7, 9, 6, 2]);
