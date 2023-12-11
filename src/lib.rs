@@ -32,6 +32,12 @@ mod util {
             n - 1
         }
     }
+
+    pub const fn in_sequence(a: usize, b: usize, c: usize) -> bool {
+        (c < b && b < a) ||
+        (b < a && a < c) ||
+        (a < c && c < b)
+    }
 }
 
 use util::*;
@@ -105,11 +111,11 @@ impl TourData {
         self.seq[self.dec(self.pos[t])]
     }
 
-    pub fn id(&self, t: NodeId, dir: bool) -> NodeId {
-        if dir {
-            self.next_id(t)
-        } else {
+    pub fn id(&self, t: NodeId, is_prev: bool) -> NodeId {
+        if is_prev {
             self.prev_id(t)
+        } else {
+            self.next_id(t)
         }
     }
 
@@ -146,7 +152,7 @@ impl TourData {
         }
     }
 
-    pub fn perturb(&mut self, rng: &mut LCG, buf: &mut Self) -> Option<[NodeId; 8]> {
+    pub fn double_bridge_move(&mut self, rng: &mut LCG, buf: &mut Self) -> Option<[NodeId; 8]> {
         let n = self.n();
         let Self { seq, .. } = self;
 
@@ -270,7 +276,7 @@ impl<'a> Tour<'a> {
             cq2,
             ..
         } = self;
-        if let Some(indices) = data.perturb(rng, buf) {
+        if let Some(indices) = data.double_bridge_move(rng, buf) {
             for x in indices {
                 cq2.push_neighbors(data, x);
             }
@@ -282,34 +288,123 @@ impl<'a> Tour<'a> {
         let Self {
             tsp,
             data,
-            cq2,
+            cq2, 
+            cq3,
             cost,
-            ..
         } = self;
 
         let d = |i, j| tsp.d_id(i, j);
         let t1 = cq2.pop().ok_or(StepError::SetEmpty)?;
-        for dir in [true, false] {
-            let t2 = data.id(t1, dir);
+        for is_prev in [false, true] {
+            let t2 = data.id(t1, is_prev);
             for &t3 in &tsp.c[t1] {
                 if d(t1, t2) < d(t1, t3) {
                     break;
                 }
-                let t4 = data.id(t3, dir);
+                let t4 = data.id(t3, is_prev);
 
                 if t1 != t4 && t2 != t3 {
                     let g = d(t1, t2) - d(t1, t3) + d(t3, t4) - d(t2, t4);
                     if g > 0 {
-                        if dir {
-                            data.opt2move(t1, t2, t3, t4);
-                        } else {
+                        if is_prev {
                             data.opt2move(t2, t1, t4, t3);
+                        } else {
+                            data.opt2move(t1, t2, t3, t4);
                         }
                         for x in [t1, t2, t3, t4] {
                             cq2.push_neighbors(data, x);
+                            cq3.push_neighbors(data, x);
                         }
                         *cost -= g;
                         return Ok(g);
+                    }
+                }
+            }
+        }
+        Err(StepError::NoGainMove(t1))
+    }
+
+    fn opt3step(&mut self, buf: &mut TourData) -> Result<i64, StepError> {
+        let Self {
+            tsp,
+            data,
+            cq2, 
+            cq3,
+            cost,
+        } = self;
+
+        let d = |i, j| tsp.d_id(i, j);
+        let t1 = cq3.pop().ok_or(StepError::SetEmpty)?;
+        let i1 = data.pos[t1];
+        let t2 = data.next_id(t1);
+        let i2 = data.pos[t2];        
+        for &t3 in &tsp.c[t2] {
+            let i3 = data.pos[t3];
+            if d(t1, t2) < d(t2, t3) {
+                break;
+            }
+
+            for is_prev in [false, true] {
+                let t4 = data.id(t3, is_prev);
+                let i4 = data.pos[t4];
+
+                if ![t1, t2].contains(&t3) && t1 != t4 {
+                    for &t5 in &tsp.c[t4] {
+                        let i5 = data.pos[t5];
+                        if ![t1, t2, t3, t4].contains(&t5) && in_sequence(i1, i3, i5) && d(t1, t2) + d(t3, t4) < d(t1, t2) + d(t4, t5) {
+                            let t6 = data.next_id(t5);
+                            let g = d(t1, t2) + d(t3, t4) + d(t5, t6) - d(t1, t6) - d(t2, t3) - d(t4, t5);
+                            if g > 0 {
+                                if is_prev {
+                                    data.reverse(t6, t4);
+                                    data.reverse(t3, t1);
+                                } else {
+                                    let seq = &mut data.seq;
+                                    let sbuf = &mut buf.seq;
+                                    sbuf.clear();
+                                    match (i2 > i5, i4 > i1) {
+                                        (true, _) => {
+                                            for slice in [&seq[i2..], &seq[..=i5], &seq[i4..=i1]] {
+                                                sbuf.extend_from_slice(slice);
+                                            }
+                                        },
+                                        (_, true) => {
+                                            for slice in [&seq[i2..=i5], &seq[i4..], &seq[..=i1]] {
+                                                sbuf.extend_from_slice(slice);
+                                            }
+                                        },
+                                        _ => {
+                                            for slice in [&seq[i2..=i5], &seq[i4..=i1]] {
+                                                sbuf.extend_from_slice(slice);
+                                            }
+                                        },
+                                    };
+                                    
+                                    if i4 < i5 {
+                                        seq[i4..=i5].copy_from_slice(&sbuf[..]);
+                                        for i in i4..=i5 {
+                                            data.pos[seq[i]] = i;
+                                        }
+                                    } else {
+                                        let j = seq[i4..].len();
+                                        let k = sbuf[j..].len();
+                                        seq[i4..].copy_from_slice(&sbuf[..j]);
+                                        seq[..k].copy_from_slice(&sbuf[j..]);
+
+                                        let n = tsp.n;
+                                        for i in (i4..n).chain(0..k) {
+                                            data.pos[seq[i]] = i;
+                                        }
+                                    }
+                                }
+                                for x in [t1, t2, t3, t4, t5, t6] {
+                                    cq2.push_neighbors(data, x);
+                                    cq3.push_neighbors(data, x);
+                                }
+                                *cost -= g;
+                                return Ok(g);
+                            }
+                        }
                     }
                 }
             }
@@ -379,8 +474,13 @@ impl<'a> Solver<'a> {
                 }
             }
 
-            // Opt3::new(&mut self.cur)
-            //     .take_while(|_| self.timer.ok());
+            while timer.ok() {
+                match cur.opt3step(&mut buf) {
+                    Err(StepError::SetEmpty) => break,
+                    _ => continue,
+                }
+            }
+
             if cur.cost < bst.cost {
                 *bst = cur.clone();
             } else {
@@ -402,7 +502,7 @@ pub struct TSP {
 }
 
 impl TSP {
-    const NEIGHBOR_LIMIT: usize = 30;
+    const NEIGHBOR_LIMIT: usize = 20;
 
     pub fn new(p: &[Point]) -> Self {
         let n = p.len();
