@@ -143,7 +143,7 @@ impl TourData {
         }
     }
 
-    pub fn opt2move(&mut self, t1: NodeId, t2: NodeId, t3: NodeId, t4: NodeId) {
+    pub fn swap2(&mut self, t1: NodeId, t2: NodeId, t3: NodeId, t4: NodeId) {
         let n = self.n();
         if self.seglen(t2, t3) < n / 2 {
             self.reverse(t2, t3);
@@ -152,7 +152,47 @@ impl TourData {
         }
     }
 
-    pub fn double_bridge_move(&mut self, rng: &mut LCG, buf: &mut Self) -> Option<[NodeId; 8]> {
+    pub fn swap3(&mut self, buf: &mut Self, i1: usize, i2: usize, i4: usize, i5: usize) {
+        let n = self.n();
+        let Self { seq, pos } = self;
+        let sbuf = &mut buf.seq;
+        sbuf.clear();
+        let slices = match (i2 > i5, i4 > i1) {
+            (true, _) => [&seq[i2..], &seq[..=i5], &seq[i4..=i1]],
+            (_, true) => [&seq[i2..=i5], &seq[i4..], &seq[..=i1]],
+            _ => [&seq[i2..=i5], &seq[i4..=i1], &[]],
+        };
+        for slice in slices {
+            sbuf.extend_from_slice(slice);
+        }
+        
+        if i4 < i5 {
+            seq[i4..=i5].copy_from_slice(&sbuf[..]);
+            for i in i4..=i5 {
+                pos[seq[i]] = i;
+            }
+        } else {
+            let j = seq[i4..].len();
+            let k = sbuf[j..].len();
+            seq[i4..].copy_from_slice(&sbuf[..j]);
+            seq[..k].copy_from_slice(&sbuf[j..]);
+            for i in (i4..n).chain(0..k) {
+                pos[seq[i]] = i;
+            }
+        }
+    }
+
+    pub fn swap4(&mut self, buf: &mut Self, i1: usize, i3: usize, i5: usize) {
+        let seq = &self.seq;
+        buf.seq.clear();
+        for slice in [&seq[..i1], &seq[i5..], &seq[i3..i5], &seq[i1..i3]] {
+            buf.seq.extend_from_slice(slice);
+        }
+        buf.repos();
+        swap(self, buf);
+    }
+
+    pub fn random_double_bridge(&mut self, rng: &mut LCG, buf: &mut Self) -> Option<[NodeId; 8]> {
         let n = self.n();
         let Self { seq, .. } = self;
 
@@ -168,14 +208,7 @@ impl TourData {
             let ans = [
                 seq[i1], seq[i2], seq[i3], seq[i4], seq[i5], seq[i6], seq[i7], seq[i8],
             ];
-
-            buf.seq.clear();
-            for slice in [&seq[..i1], &seq[i5..], &seq[i3..i5], &seq[i1..i3]] {
-                buf.seq.extend_from_slice(slice);
-            }
-            buf.repos();
-            swap(self, buf);
-
+            self.swap4(buf, i1, i3, i5);
             Some(ans)
         } else {
             None
@@ -210,12 +243,6 @@ impl CandidateQueue {
             seen[x] = true;
             q.push_back(x);
         }
-    }
-
-    pub fn push_neighbors(&mut self, data: &TourData, x: NodeId) {
-        self.push(x);
-        self.push(data.next_id(x));
-        self.push(data.prev_id(x));
     }
 }
 
@@ -274,11 +301,12 @@ impl<'a> Tour<'a> {
             cost,
             data,
             cq2,
-            ..
+            cq3,
         } = self;
-        if let Some(indices) = data.double_bridge_move(rng, buf) {
-            for x in indices {
-                cq2.push_neighbors(data, x);
+        if let Some(ts) = data.random_double_bridge(rng, buf) {
+            for a in ts {
+                cq2.push(a);
+                cq3.push(a);
             }
             *cost = tsp.compute_cost(&data.seq);
         }
@@ -307,13 +335,13 @@ impl<'a> Tour<'a> {
                     let g = d(t1, t2) - d(t1, t3) + d(t3, t4) - d(t2, t4);
                     if g > 0 {
                         if is_prev {
-                            data.opt2move(t2, t1, t4, t3);
+                            data.swap2(t2, t1, t4, t3);
                         } else {
-                            data.opt2move(t1, t2, t3, t4);
+                            data.swap2(t1, t2, t3, t4);
                         }
-                        for x in [t1, t2, t3, t4] {
-                            cq2.push_neighbors(data, x);
-                            cq3.push_neighbors(data, x);
+                        for a in [t1, t2, t3, t4] {
+                            cq2.push(a);
+                            cq3.push(a);
                         }
                         *cost -= g;
                         return Ok(g);
@@ -359,47 +387,11 @@ impl<'a> Tour<'a> {
                                     data.reverse(t6, t4);
                                     data.reverse(t3, t1);
                                 } else {
-                                    let seq = &mut data.seq;
-                                    let sbuf = &mut buf.seq;
-                                    sbuf.clear();
-                                    match (i2 > i5, i4 > i1) {
-                                        (true, _) => {
-                                            for slice in [&seq[i2..], &seq[..=i5], &seq[i4..=i1]] {
-                                                sbuf.extend_from_slice(slice);
-                                            }
-                                        },
-                                        (_, true) => {
-                                            for slice in [&seq[i2..=i5], &seq[i4..], &seq[..=i1]] {
-                                                sbuf.extend_from_slice(slice);
-                                            }
-                                        },
-                                        _ => {
-                                            for slice in [&seq[i2..=i5], &seq[i4..=i1]] {
-                                                sbuf.extend_from_slice(slice);
-                                            }
-                                        },
-                                    };
-                                    
-                                    if i4 < i5 {
-                                        seq[i4..=i5].copy_from_slice(&sbuf[..]);
-                                        for i in i4..=i5 {
-                                            data.pos[seq[i]] = i;
-                                        }
-                                    } else {
-                                        let j = seq[i4..].len();
-                                        let k = sbuf[j..].len();
-                                        seq[i4..].copy_from_slice(&sbuf[..j]);
-                                        seq[..k].copy_from_slice(&sbuf[j..]);
-
-                                        let n = tsp.n;
-                                        for i in (i4..n).chain(0..k) {
-                                            data.pos[seq[i]] = i;
-                                        }
-                                    }
+                                    data.swap3(buf, i1, i2, i4, i5);
                                 }
-                                for x in [t1, t2, t3, t4, t5, t6] {
-                                    cq2.push_neighbors(data, x);
-                                    cq3.push_neighbors(data, x);
+                                for a in [t1, t2, t3, t4, t5, t6] {
+                                    cq2.push(a);
+                                    cq3.push(a);
                                 }
                                 *cost -= g;
                                 return Ok(g);
@@ -409,7 +401,7 @@ impl<'a> Tour<'a> {
                 }
             }
         }
-        Err(StepError::NoGainMove(t1))
+    Err(StepError::NoGainMove(t1))
     }
 }
 
